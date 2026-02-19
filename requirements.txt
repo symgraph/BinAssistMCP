@@ -1,24 +1,5 @@
-# Core MCP framework
 mcp==1.23.3
-
-# Async/ASGI server support
 anyio>=4.0.0
 hypercorn>=0.16.0
-
-# Configuration management
 pydantic>=2.0.0
 pydantic-settings>=2.0.0
-
-# CLI interface
-click>=8.0.0
-
-# Binary Ninja API (optional - only needed if Binary Ninja is installed)
-# binaryninja
-
-# Development dependencies (optional)
-# pytest>=7.0.0
-# pytest-cov>=4.0.0
-# pytest-asyncio>=0.21.0
-# ruff>=0.1.0
-# mypy>=1.5.0
-# pre-commit>=3.0.0
