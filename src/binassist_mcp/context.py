@@ -31,10 +31,14 @@ class BinaryInfo:
     file_path: Optional[Path] = None
     load_time: Optional[float] = None
     analysis_complete: bool = False
+    bndb_path: Optional[Path] = None  # Where to save .bndb after analysis
+    bndb_saved: bool = False  # Whether .bndb has been saved
     
     def __post_init__(self):
         if self.file_path and isinstance(self.file_path, str):
             self.file_path = Path(self.file_path)
+        if self.bndb_path and isinstance(self.bndb_path, str):
+            self.bndb_path = Path(self.bndb_path)
 
 
 class BinAssistMCPBinaryContextManager:
@@ -101,11 +105,21 @@ class BinAssistMCPBinaryContextManager:
         the UI to pick up the new BinaryView. Falls back to headless bn.load()
         if no UI is available.
 
-        For raw binaries (non-.bndb files): bndb_path is required. After
-        analysis completes, the analyzed database is saved to bndb_path.
+        For raw binaries (non-.bndb files): bndb_path is required. The .bndb
+        database is saved automatically when analysis completes (in background).
 
         For existing .bndb files: bndb_path is ignored — the database is
         already on disk and will be opened directly.
+
+        IMPORTANT: This method returns as soon as the BinaryView is available
+        in the context, WITHOUT waiting for analysis to complete. Analysis
+        runs in the background. Use get_analysis_progress() or
+        get_binary_status to check when analysis is done. This design
+        prevents blocking the MCP event loop during long analysis runs.
+
+        When wait_for_analysis=True (legacy behavior), this method will
+        block until analysis completes. This is NOT recommended for large
+        binaries as it blocks the MCP server from handling other requests.
 
         Args:
             file_path: Path to the binary file or .bndb database to open
@@ -116,13 +130,15 @@ class BinAssistMCPBinaryContextManager:
             wait_for_analysis: Whether to wait for Binary Ninja's initial analysis
                                to complete before returning (default True).
                                Set to False for faster return on large binaries.
+                               When False, analysis runs in background and .bndb
+                               is saved automatically when analysis completes.
 
         Returns:
             Tuple of (binary_name, status_dict) where status_dict contains:
             - file_path: Path of the opened file
-            - bndb_path: Path of the .bndb database (saved or existing)
+            - bndb_path: Path of the .bndb database (saved or pending)
             - analysis_complete: Whether analysis finished
-            - function_count: Number of functions discovered
+            - function_count: Number of functions discovered so far
             - error: Error message if any step failed (partial success possible)
 
         Raises:
@@ -149,9 +165,14 @@ class BinAssistMCPBinaryContextManager:
                 "user for the desired save location."
             )
 
+        # Resolve bndb_path early so we can store it in BinaryInfo
+        resolved_bndb_path = None
+        if not is_bndb and bndb_path:
+            resolved_bndb_path = Path(bndb_path).resolve()
+
         status = {
             "file_path": resolved_path,
-            "bndb_path": resolved_path if is_bndb else None,
+            "bndb_path": resolved_path if is_bndb else (str(resolved_bndb_path) if resolved_bndb_path else None),
             "analysis_complete": False,
             "function_count": 0,
             "error": None,
@@ -197,16 +218,16 @@ class BinAssistMCPBinaryContextManager:
                     "unsupported format, corrupt file, or no UI context available"
                 )
 
-            log.log_info(f"UI opened {file_path}, waiting for analysis...")
+            log.log_info(f"UI opened {file_path}, waiting for view to appear in context...")
 
-            # Wait for BN to finish loading and analyzing the binary.
-            # The UI opens asynchronously; we need to poll until the view
-            # appears in the UI tabs and (optionally) analysis completes.
-            max_wait = 120  # seconds
+            # Wait for BN to load the view into a tab. We ONLY wait for the
+            # view to appear — not for analysis to complete. This keeps the
+            # polling loop short (typically < 5 seconds).
+            max_wait_for_view = 30  # seconds — generous for slow file parsing
             poll_interval = 0.5
             elapsed = 0.0
 
-            while elapsed < max_wait:
+            while elapsed < max_wait_for_view:
                 time.sleep(poll_interval)
                 elapsed += poll_interval
 
@@ -221,18 +242,33 @@ class BinAssistMCPBinaryContextManager:
                             break
 
                 if bv is not None:
-                    if not wait_for_analysis:
-                        break
-                    # Check if analysis is done
-                    if self._is_analysis_complete(bv):
-                        log.log_info(f"Analysis complete for {file_path}")
-                        break
+                    break
 
             if bv is None:
                 raise ValueError(
                     f"Binary '{file_path}' was opened in the UI but did not appear "
-                    f"in context after {max_wait}s — this should not happen"
+                    f"in context after {max_wait_for_view}s — this should not happen"
                 )
+
+            # Store bndb_path in BinaryInfo for deferred save
+            if resolved_bndb_path:
+                with self._lock:
+                    for name, info in self._binaries.items():
+                        if info.view is bv:
+                            info.bndb_path = resolved_bndb_path
+                            break
+
+            # Optionally wait for analysis (blocking — NOT recommended)
+            if wait_for_analysis:
+                log.log_info(f"wait_for_analysis=True, blocking until analysis completes...")
+                max_analysis_wait = 120
+                analysis_elapsed = 0.0
+                while analysis_elapsed < max_analysis_wait:
+                    if self._is_analysis_complete(bv):
+                        log.log_info(f"Analysis complete for {file_path}")
+                        break
+                    time.sleep(poll_interval)
+                    analysis_elapsed += poll_interval
 
         else:
             # ----- Headless mode: fall back to bn.load() -----
@@ -262,9 +298,18 @@ class BinAssistMCPBinaryContextManager:
             # Add to context manager (in UI mode, sync_with_binja already did this)
             self.add_binary(bv)
 
+            # Store bndb_path in BinaryInfo for deferred save
+            if resolved_bndb_path:
+                with self._lock:
+                    for name, info in self._binaries.items():
+                        if info.view is bv:
+                            info.bndb_path = resolved_bndb_path
+                            break
+
         # --- Common post-open logic ---
 
-        status["analysis_complete"] = self._is_analysis_complete(bv)
+        analysis_done = self._is_analysis_complete(bv)
+        status["analysis_complete"] = analysis_done
 
         # Count functions
         try:
@@ -272,20 +317,33 @@ class BinAssistMCPBinaryContextManager:
         except Exception:
             pass
 
-        # Save analyzed database to .bndb (only for raw binaries, not .bndb files)
-        if not is_bndb and bndb_path:
-            bndb = Path(bndb_path)
-            try:
-                bndb.parent.mkdir(parents=True, exist_ok=True)
-                bv.create_database(str(bndb.resolve()))
-                status["bndb_path"] = str(bndb.resolve())
-                log.log_info(f"Saved .bndb database to {bndb_path}")
-            except Exception as e:
-                log.log_warn(f"Failed to save .bndb to '{bndb_path}': {e}")
-                if status["error"]:
-                    status["error"] += f"; bndb save failed: {e}"
-                else:
-                    status["error"] = f"bndb save failed: {e}"
+        # Save .bndb immediately if analysis is already complete,
+        # otherwise it will be saved automatically when analysis finishes
+        # (triggered by get_analysis_progress polling)
+        if not is_bndb and resolved_bndb_path:
+            if analysis_done:
+                try:
+                    resolved_bndb_path.parent.mkdir(parents=True, exist_ok=True)
+                    bv.create_database(str(resolved_bndb_path))
+                    status["bndb_path"] = str(resolved_bndb_path)
+                    with self._lock:
+                        for name, info in self._binaries.items():
+                            if info.view is bv:
+                                info.bndb_saved = True
+                                break
+                    log.log_info(f"Saved .bndb database to {bndb_path}")
+                except Exception as e:
+                    log.log_warn(f"Failed to save .bndb to '{bndb_path}': {e}")
+                    if status["error"]:
+                        status["error"] += f"; bndb save failed: {e}"
+                    else:
+                        status["error"] = f"bndb save failed: {e}"
+            else:
+                # Analysis not done — .bndb will be saved when analysis completes
+                log.log_info(
+                    f".bndb save deferred — will auto-save to {bndb_path} "
+                    f"when analysis completes"
+                )
 
         # Find the name this binary was registered under
         binary_name = None
@@ -406,7 +464,123 @@ class BinAssistMCPBinaryContextManager:
                 if binary_info.view:
                     binary_info.analysis_complete = self._is_analysis_complete(binary_info.view)
                     log.log_debug(f"Updated analysis status for '{name}': {binary_info.analysis_complete}")
-                
+
+    def get_analysis_progress(self, name: str) -> dict:
+        """Get detailed analysis progress for a binary.
+
+        Returns real-time progress information including state description
+        and function count. This is safe to call frequently and does not
+        block the event loop.
+
+        Args:
+            name: Name of the binary
+
+        Returns:
+            Dictionary with:
+            - state: Human-readable analysis state string
+            - analyzing: bool, True if analysis is still running
+            - analysis_complete: bool, True if analysis finished
+            - function_count: Number of functions discovered so far
+            - bndb_saved: Whether the .bndb has been saved
+            - message: Descriptive status message for LLM consumption
+        """
+        result = {
+            "state": "unknown",
+            "analyzing": False,
+            "analysis_complete": False,
+            "function_count": 0,
+            "bndb_saved": False,
+            "message": "",
+        }
+
+        with self._lock:
+            if name not in self._binaries:
+                result["state"] = "not_found"
+                result["message"] = f"Binary '{name}' not found in context."
+                return result
+
+            info = self._binaries[name]
+            result["bndb_saved"] = info.bndb_saved
+
+        bv = info.view
+        if not bv or not BINJA_AVAILABLE or not AnalysisState:
+            result["state"] = "no_view"
+            result["message"] = "Binary view is not available."
+            return result
+
+        # Get function count (safe even during analysis)
+        try:
+            result["function_count"] = len(list(bv.functions))
+        except Exception:
+            pass
+
+        # Read analysis state from BinaryView
+        try:
+            if hasattr(bv, 'analysis_progress'):
+                progress = bv.analysis_progress
+                current_state = progress.state
+
+                if current_state == AnalysisState.IdleState:
+                    result["state"] = "idle"
+                    result["analyzing"] = False
+                    result["analysis_complete"] = True
+                    result["message"] = (
+                        f"Analysis complete. {result['function_count']} functions discovered."
+                    )
+                    # Update the cached flag
+                    with self._lock:
+                        if name in self._binaries:
+                            self._binaries[name].analysis_complete = True
+                            # Auto-save .bndb if analysis just finished and we haven't saved yet
+                            if not info.bndb_saved and info.bndb_path:
+                                self._save_bndb_async(name, bv, info.bndb_path)
+                else:
+                    result["state"] = str(current_state)
+                    result["analyzing"] = True
+                    result["analysis_complete"] = False
+                    result["message"] = (
+                        f"Analysis in progress ({result['state']}). "
+                        f"{result['function_count']} functions discovered so far. "
+                        f"Use get_binary_status to check progress. "
+                        f"Some tools may return incomplete results."
+                    )
+            else:
+                result["state"] = "unknown"
+                result["message"] = "Cannot determine analysis state."
+        except Exception as e:
+            result["state"] = "error"
+            result["message"] = f"Error checking analysis progress: {e}"
+            log.log_debug(f"Error in get_analysis_progress for '{name}': {e}")
+
+        return result
+
+    def _save_bndb_async(self, name: str, bv: object, bndb_path: Path):
+        """Save .bndb database in a background thread (non-blocking).
+
+        Called automatically when analysis completes for a binary that
+        was opened with a bndb_path specified.
+
+        Args:
+            name: Binary name (for logging)
+            bv: The BinaryView to save
+            bndb_path: Where to save the .bndb file
+        """
+        def _do_save():
+            try:
+                bndb_path.parent.mkdir(parents=True, exist_ok=True)
+                bv.create_database(str(bndb_path.resolve()))
+                with self._lock:
+                    if name in self._binaries:
+                        self._binaries[name].bndb_saved = True
+                log.log_info(f"Saved .bndb database to {bndb_path}")
+            except Exception as e:
+                log.log_warn(f"Failed to save .bndb to '{bndb_path}': {e}")
+
+        save_thread = threading.Thread(
+            target=_do_save, name=f"bndb-save-{name}", daemon=True
+        )
+        save_thread.start()
+
     def _extract_name(self, binary_view: object) -> str:
         """Extract name from a BinaryView"""
         if not BINJA_AVAILABLE or not binary_view:
