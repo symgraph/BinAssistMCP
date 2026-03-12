@@ -498,6 +498,51 @@ class BinAssistMCPServer:
             "openWorldHint": False
         }
 
+        def _check_analysis_guard(context_manager: BinAssistMCPBinaryContextManager,
+                                   filename: str) -> Optional[dict]:
+            """Check if a binary is still being analyzed and return a guard response.
+
+            If the binary is currently being analyzed, returns a structured dict
+            that tells the LLM to wait and retry. If analysis is complete (or
+            the binary is not found — let downstream handle that), returns None
+            so the tool can proceed normally.
+
+            This prevents cryptic 'Function not found' errors during analysis
+            and gives the LLM actionable information about when to retry.
+
+            Args:
+                context_manager: The binary context manager
+                filename: Name of the binary to check
+
+            Returns:
+                None if the tool should proceed normally, or a dict with
+                analysis status information if the binary is still analyzing.
+            """
+            try:
+                progress = context_manager.get_analysis_progress(filename)
+            except Exception:
+                # If we can't check progress, let the tool proceed and fail naturally
+                return None
+
+            if progress.get("analyzing"):
+                return {
+                    "status": "analyzing",
+                    "analysis_complete": False,
+                    "analysis_state": progress.get("state", "unknown"),
+                    "function_count": progress.get("function_count", 0),
+                    "message": (
+                        f"Binary '{filename}' is still being analyzed "
+                        f"({progress.get('state', 'unknown')} state, "
+                        f"{progress.get('function_count', 0)} functions found so far). "
+                        f"Please call get_binary_status('{filename}') to check progress "
+                        f"and retry this tool once analysis_complete is true."
+                    ),
+                    "retry_tool": "get_binary_status",
+                    "retry_args": {"filename": filename},
+                }
+
+            return None
+
         @mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
         def list_binaries(ctx: Context) -> dict:
             """List all currently loaded binary names with auto-refresh from Binary Ninja
@@ -532,12 +577,19 @@ class BinAssistMCPServer:
             context_manager: BinAssistMCPBinaryContextManager = ctx.request_context.lifespan_context
             try:
                 binary_info = context_manager.get_binary_info(filename)
+                # Get live analysis progress (not just cached flag)
+                progress = context_manager.get_analysis_progress(filename)
                 return {
                     "name": binary_info.name,
                     "loaded": True,
                     "file_path": str(binary_info.file_path) if binary_info.file_path else None,
-                    "analysis_complete": binary_info.analysis_complete,
-                    "load_time": binary_info.load_time
+                    "analysis_complete": progress["analysis_complete"],
+                    "analyzing": progress["analyzing"],
+                    "analysis_state": progress["state"],
+                    "function_count": progress["function_count"],
+                    "bndb_saved": progress["bndb_saved"],
+                    "load_time": binary_info.load_time,
+                    "message": progress["message"],
                 }
             except KeyError as e:
                 return {
@@ -545,6 +597,69 @@ class BinAssistMCPServer:
                     "loaded": False,
                     "error": str(e)
                 }
+
+        # Open binary tool - non-idempotent, modifies state
+        OPEN_BINARY_ANNOTATIONS = {
+            "readOnlyHint": False,
+            "idempotentHint": False,
+            "openWorldHint": True  # reads from filesystem
+        }
+
+        @mcp.tool(annotations=OPEN_BINARY_ANNOTATIONS)
+        def open_binary(file_path: str, ctx: Context,
+                       bndb_path: Optional[str] = None,
+                       wait_for_analysis: bool = False) -> dict:
+            """Open a binary file from disk and load it into Binary Ninja for analysis.
+
+            This allows programmatic loading of new binaries without requiring
+            the user to manually open them in the Binary Ninja UI.
+
+            IMPORTANT: You MUST ask the user where they want the analyzed .bndb
+            database saved before calling this tool. The bndb_path parameter is
+            required and specifies the output location for the Binary Ninja
+            database file that preserves all analysis results.
+
+            When opening an existing .bndb database file, bndb_path is not
+            needed — the database is already saved on disk.
+
+            By default, this tool returns immediately after the binary is loaded
+            WITHOUT waiting for analysis to complete. Analysis runs in the
+            background. Use get_binary_status to check progress. The .bndb
+            database is saved automatically when analysis finishes.
+
+            IMPORTANT: While analysis is running, tools that query functions
+            (decompile, get_functions, etc.) may return incomplete results.
+            Always check get_binary_status before using analysis-dependent tools.
+
+            Args:
+                file_path: Absolute or relative path to the binary file to open
+                bndb_path: Path where the .bndb database file will be saved after
+                           analysis completes. This is required. Ask the user for
+                           the desired save location before calling this tool.
+                           Example: "C:/analysis/output/notepad.exe.bndb"
+                wait_for_analysis: Whether to wait for Binary Ninja's initial analysis
+                                   to complete before returning (default False).
+                                   Set to False for faster return on large binaries.
+
+            Returns:
+                Dictionary with:
+                - name: The name assigned to this binary in the context (use this for other tools)
+                - file_path: Resolved absolute path of the opened file
+                - bndb_path: Path of the saved .bndb database
+                - analysis_complete: Whether analysis finished
+                - function_count: Number of functions discovered
+                - error: Error message if any step partially failed, else null
+            """
+            context_manager: BinAssistMCPBinaryContextManager = ctx.request_context.lifespan_context
+            binary_name, status = context_manager.open_binary(
+                file_path=file_path,
+                bndb_path=bndb_path,
+                wait_for_analysis=wait_for_analysis
+            )
+            return {
+                "name": binary_name,
+                **status
+            }
 
         # Analysis tools
         @mcp.tool(annotations=MODIFY_ANNOTATIONS)
@@ -560,6 +675,9 @@ class BinAssistMCPServer:
                 Success message string
             """
             context_manager: BinAssistMCPBinaryContextManager = ctx.request_context.lifespan_context
+            guard = _check_analysis_guard(context_manager, filename)
+            if guard:
+                return guard
             binary_view = context_manager.get_binary(filename)
             tools = BinAssistMCPTools(binary_view)
             return tools.rename_symbol(address_or_name, new_name)
@@ -578,6 +696,9 @@ class BinAssistMCPServer:
                 List of function dictionaries with name, address, size, and metadata
             """
             context_manager: BinAssistMCPBinaryContextManager = ctx.request_context.lifespan_context
+            guard = _check_analysis_guard(context_manager, filename)
+            if guard:
+                return guard
             binary_view = context_manager.get_binary(filename)
             tools = BinAssistMCPTools(binary_view)
             return tools.get_functions()
@@ -594,6 +715,9 @@ class BinAssistMCPServer:
                 List of matching functions
             """
             context_manager: BinAssistMCPBinaryContextManager = ctx.request_context.lifespan_context
+            guard = _check_analysis_guard(context_manager, filename)
+            if guard:
+                return guard
             binary_view = context_manager.get_binary(filename)
             tools = BinAssistMCPTools(binary_view)
             return tools.search_functions_by_name(search_term)
@@ -609,6 +733,9 @@ class BinAssistMCPServer:
                 Dictionary mapping module names to lists of imported symbols
             """
             context_manager: BinAssistMCPBinaryContextManager = ctx.request_context.lifespan_context
+            guard = _check_analysis_guard(context_manager, filename)
+            if guard:
+                return guard
             binary_view = context_manager.get_binary(filename)
             tools = BinAssistMCPTools(binary_view)
             return tools.get_imports()
@@ -624,6 +751,9 @@ class BinAssistMCPServer:
                 List of exported symbols with names, addresses, and types
             """
             context_manager: BinAssistMCPBinaryContextManager = ctx.request_context.lifespan_context
+            guard = _check_analysis_guard(context_manager, filename)
+            if guard:
+                return guard
             binary_view = context_manager.get_binary(filename)
             tools = BinAssistMCPTools(binary_view)
             return tools.get_exports()
@@ -641,6 +771,9 @@ class BinAssistMCPServer:
                 Dictionary with strings list, page_size, page_number, total_count, and total_pages
             """
             context_manager: BinAssistMCPBinaryContextManager = ctx.request_context.lifespan_context
+            guard = _check_analysis_guard(context_manager, filename)
+            if guard:
+                return guard
             binary_view = context_manager.get_binary(filename)
             tools = BinAssistMCPTools(binary_view)
             return tools.get_strings(page_size=page_size, page_number=page_number)
@@ -656,6 +789,9 @@ class BinAssistMCPServer:
                 List of segments with start, end, length, and permissions
             """
             context_manager: BinAssistMCPBinaryContextManager = ctx.request_context.lifespan_context
+            guard = _check_analysis_guard(context_manager, filename)
+            if guard:
+                return guard
             binary_view = context_manager.get_binary(filename)
             tools = BinAssistMCPTools(binary_view)
             return tools.get_segments()
@@ -671,6 +807,9 @@ class BinAssistMCPServer:
                 List of sections with name, start, end, length, and metadata
             """
             context_manager: BinAssistMCPBinaryContextManager = ctx.request_context.lifespan_context
+            guard = _check_analysis_guard(context_manager, filename)
+            if guard:
+                return guard
             binary_view = context_manager.get_binary(filename)
             tools = BinAssistMCPTools(binary_view)
             return tools.get_sections()
@@ -712,6 +851,9 @@ class BinAssistMCPServer:
                 List of class/struct definitions with members
             """
             context_manager: BinAssistMCPBinaryContextManager = ctx.request_context.lifespan_context
+            guard = _check_analysis_guard(context_manager, filename)
+            if guard:
+                return guard
             binary_view = context_manager.get_binary(filename)
             tools = BinAssistMCPTools(binary_view)
             return tools.get_classes()
@@ -729,6 +871,9 @@ class BinAssistMCPServer:
                 List of namespaces with their symbols
             """
             context_manager: BinAssistMCPBinaryContextManager = ctx.request_context.lifespan_context
+            guard = _check_analysis_guard(context_manager, filename)
+            if guard:
+                return guard
             binary_view = context_manager.get_binary(filename)
             tools = BinAssistMCPTools(binary_view)
             return tools.get_namespaces()
@@ -748,6 +893,9 @@ class BinAssistMCPServer:
                 Success message
             """
             context_manager: BinAssistMCPBinaryContextManager = ctx.request_context.lifespan_context
+            guard = _check_analysis_guard(context_manager, filename)
+            if guard:
+                return guard
             binary_view = context_manager.get_binary(filename)
             tools = BinAssistMCPTools(binary_view)
             return tools.create_data_var(address, var_type, name)
@@ -763,6 +911,9 @@ class BinAssistMCPServer:
                 List of data variables with address, type, size, and name
             """
             context_manager: BinAssistMCPBinaryContextManager = ctx.request_context.lifespan_context
+            guard = _check_analysis_guard(context_manager, filename)
+            if guard:
+                return guard
             binary_view = context_manager.get_binary(filename)
             tools = BinAssistMCPTools(binary_view)
             return tools.get_data_vars()
@@ -780,6 +931,9 @@ class BinAssistMCPServer:
                 Dictionary with data information including hex, raw bytes, and interpreted values
             """
             context_manager: BinAssistMCPBinaryContextManager = ctx.request_context.lifespan_context
+            guard = _check_analysis_guard(context_manager, filename)
+            if guard:
+                return guard
             binary_view = context_manager.get_binary(filename)
             tools = BinAssistMCPTools(binary_view)
             return tools.get_data_at_address(address, size)
@@ -803,6 +957,9 @@ class BinAssistMCPServer:
                 Comprehensive function analysis including control flow, complexity, and call information
             """
             context_manager: BinAssistMCPBinaryContextManager = ctx.request_context.lifespan_context
+            guard = _check_analysis_guard(context_manager, filename)
+            if guard:
+                return guard
             binary_view = context_manager.get_binary(filename)
             tools = BinAssistMCPTools(binary_view)
             return tools.analyze_function(function_name_or_address)
@@ -831,6 +988,9 @@ class BinAssistMCPServer:
                 Filtered and sorted list of functions
             """
             context_manager: BinAssistMCPBinaryContextManager = ctx.request_context.lifespan_context
+            guard = _check_analysis_guard(context_manager, filename)
+            if guard:
+                return guard
             binary_view = context_manager.get_binary(filename)
             tools = BinAssistMCPTools(binary_view)
             # Convert empty/zero values back to None for the underlying function
@@ -857,6 +1017,9 @@ class BinAssistMCPServer:
                 List of matching functions
             """
             context_manager: BinAssistMCPBinaryContextManager = ctx.request_context.lifespan_context
+            guard = _check_analysis_guard(context_manager, filename)
+            if guard:
+                return guard
             binary_view = context_manager.get_binary(filename)
             tools = BinAssistMCPTools(binary_view)
             return tools.search_functions_advanced(search_term, search_in, case_sensitive)
@@ -872,6 +1035,9 @@ class BinAssistMCPServer:
                 Statistics including size, complexity, parameters, and top functions
             """
             context_manager: BinAssistMCPBinaryContextManager = ctx.request_context.lifespan_context
+            guard = _check_analysis_guard(context_manager, filename)
+            if guard:
+                return guard
             binary_view = context_manager.get_binary(filename)
             tools = BinAssistMCPTools(binary_view)
             return tools.get_function_statistics()
@@ -888,6 +1054,9 @@ class BinAssistMCPServer:
                 Dictionary containing current address information with context
             """
             context_manager: BinAssistMCPBinaryContextManager = ctx.request_context.lifespan_context
+            guard = _check_analysis_guard(context_manager, filename)
+            if guard:
+                return guard
             binary_view = context_manager.get_binary(filename)
             tools = BinAssistMCPTools(binary_view)
             return tools.get_current_address()
@@ -903,6 +1072,9 @@ class BinAssistMCPServer:
                 Dictionary containing current function name and address
             """
             context_manager: BinAssistMCPBinaryContextManager = ctx.request_context.lifespan_context
+            guard = _check_analysis_guard(context_manager, filename)
+            if guard:
+                return guard
             binary_view = context_manager.get_binary(filename)
             tools = BinAssistMCPTools(binary_view)
             return tools.get_current_function()
@@ -927,6 +1099,9 @@ class BinAssistMCPServer:
                 Dictionary with function info and code
             """
             context_manager: BinAssistMCPBinaryContextManager = ctx.request_context.lifespan_context
+            guard = _check_analysis_guard(context_manager, filename)
+            if guard:
+                return guard
             binary_view = context_manager.get_binary(filename)
             tools = BinAssistMCPTools(binary_view)
             return tools.get_code(function_name_or_address, format)
@@ -948,6 +1123,9 @@ class BinAssistMCPServer:
                 Varies by action
             """
             context_manager: BinAssistMCPBinaryContextManager = ctx.request_context.lifespan_context
+            guard = _check_analysis_guard(context_manager, filename)
+            if guard:
+                return guard
             binary_view = context_manager.get_binary(filename)
             tools = BinAssistMCPTools(binary_view)
             return tools.comments(action, address, text, function_name_or_address)
@@ -971,6 +1149,9 @@ class BinAssistMCPServer:
                 List or success message
             """
             context_manager: BinAssistMCPBinaryContextManager = ctx.request_context.lifespan_context
+            guard = _check_analysis_guard(context_manager, filename)
+            if guard:
+                return guard
             binary_view = context_manager.get_binary(filename)
             tools = BinAssistMCPTools(binary_view)
             return tools.variables_unified(action, function_name_or_address, var_name, var_type, new_name, storage)
@@ -999,6 +1180,9 @@ class BinAssistMCPServer:
                 Varies by action
             """
             context_manager: BinAssistMCPBinaryContextManager = ctx.request_context.lifespan_context
+            guard = _check_analysis_guard(context_manager, filename)
+            if guard:
+                return guard
             binary_view = context_manager.get_binary(filename)
             tools = BinAssistMCPTools(binary_view)
             return tools.types_unified(action, name, "", definition, size, members, base_type,
@@ -1019,6 +1203,9 @@ class BinAssistMCPServer:
                 Cross-reference information
             """
             context_manager: BinAssistMCPBinaryContextManager = ctx.request_context.lifespan_context
+            guard = _check_analysis_guard(context_manager, filename)
+            if guard:
+                return guard
             binary_view = context_manager.get_binary(filename)
             tools = BinAssistMCPTools(binary_view)
             return tools.xrefs(address_or_name, direction, include_calls)
@@ -1037,6 +1224,9 @@ class BinAssistMCPServer:
                 LLIL as string
             """
             context_manager: BinAssistMCPBinaryContextManager = ctx.request_context.lifespan_context
+            guard = _check_analysis_guard(context_manager, filename)
+            if guard:
+                return guard
             binary_view = context_manager.get_binary(filename)
             tools = BinAssistMCPTools(binary_view)
             return tools.get_function_low_level_il(address_or_name)
@@ -1058,6 +1248,9 @@ class BinAssistMCPServer:
                 Dictionary with strings list, page_size, page_number, total_count, and total_pages
             """
             context_manager: BinAssistMCPBinaryContextManager = ctx.request_context.lifespan_context
+            guard = _check_analysis_guard(context_manager, filename)
+            if guard:
+                return guard
             binary_view = context_manager.get_binary(filename)
             tools = BinAssistMCPTools(binary_view)
             return tools.search_strings(pattern, case_sensitive,
@@ -1078,6 +1271,9 @@ class BinAssistMCPServer:
                 List of matches
             """
             context_manager: BinAssistMCPBinaryContextManager = ctx.request_context.lifespan_context
+            guard = _check_analysis_guard(context_manager, filename)
+            if guard:
+                return guard
             binary_view = context_manager.get_binary(filename)
             tools = BinAssistMCPTools(binary_view)
             return tools.search_bytes(pattern, start_address, max_results)
@@ -1094,6 +1290,9 @@ class BinAssistMCPServer:
                 List of basic blocks
             """
             context_manager: BinAssistMCPBinaryContextManager = ctx.request_context.lifespan_context
+            guard = _check_analysis_guard(context_manager, filename)
+            if guard:
+                return guard
             binary_view = context_manager.get_binary(filename)
             tools = BinAssistMCPTools(binary_view)
             return tools.get_basic_blocks(function_name_or_address)
@@ -1110,6 +1309,9 @@ class BinAssistMCPServer:
                 Stack layout information
             """
             context_manager: BinAssistMCPBinaryContextManager = ctx.request_context.lifespan_context
+            guard = _check_analysis_guard(context_manager, filename)
+            if guard:
+                return guard
             binary_view = context_manager.get_binary(filename)
             tools = BinAssistMCPTools(binary_view)
             return tools.get_function_stack_layout(function_name_or_address)
@@ -1126,6 +1328,9 @@ class BinAssistMCPServer:
                 List of results for each rename
             """
             context_manager: BinAssistMCPBinaryContextManager = ctx.request_context.lifespan_context
+            guard = _check_analysis_guard(context_manager, filename)
+            if guard:
+                return guard
             binary_view = context_manager.get_binary(filename)
             tools = BinAssistMCPTools(binary_view)
             return tools.batch_rename(renames)

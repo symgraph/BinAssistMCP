@@ -33,7 +33,7 @@ class LogLevel(str, Enum):
 class ServerConfig(BaseModel):
     """Server-specific configuration"""
     host: str = Field(default="localhost", description="Server host address")
-    port: int = Field(default=9090, ge=1024, le=65535, description="Server port")
+    port: int = Field(default=8000, ge=1024, le=65535, description="Server port")
     transport: TransportType = Field(default=TransportType.STREAMABLEHTTP, description="Transport type (SSE or Streamable HTTP)")
     max_connections: int = Field(default=100, ge=1, description="Maximum concurrent connections")
     
@@ -175,7 +175,7 @@ class BinAssistMCPConfig(BaseSettings):
             if not settings_manager.contains("binassistmcp.server.port"):
                 settings_manager.register_setting(
                     "binassistmcp.server.port",
-                    '{"description": "BinAssistMCP server port", "title": "Server Port", "default": 9090, "type": "number", "minValue": 1024, "maxValue": 65535}'
+                    '{"description": "BinAssistMCP server port", "title": "Server Port", "default": 8000, "type": "number", "minValue": 1024, "maxValue": 65535}'
                 )
             if not settings_manager.contains("binassistmcp.server.transport"):
                 settings_manager.register_setting(
