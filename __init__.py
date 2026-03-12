@@ -68,6 +68,17 @@ try:
         bn.log_info("BinAssistMCP plugin loaded successfully")
         bn.log_info("BinAssistMCP auto-startup enabled - server will start automatically when analysis completes")
         
+        # Start the MCP server immediately (even without a binary open).
+        # The analysis-completion callback above will add binaries as they
+        # are opened later.
+        if plugin_instance.config and plugin_instance.config.plugin.auto_startup:
+            try:
+                logger.info("Starting BinAssistMCP server immediately (no binary required)...")
+                plugin_instance._start_server_command(None)
+            except Exception as start_err:
+                logger.error(f"Failed to auto-start server on plugin load: {start_err}")
+                bn.log_error(f"BinAssistMCP: failed to auto-start server: {start_err}")
+        
     except ImportError as import_err:
         logger.error(f"Failed to import BinAssistMCP modules: {import_err}")
         bn.log_error(f"BinAssistMCP plugin failed to load - missing dependencies: {import_err}")

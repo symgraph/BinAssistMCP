@@ -546,6 +546,60 @@ class BinAssistMCPServer:
                     "error": str(e)
                 }
 
+        # Open binary tool - non-idempotent, modifies state
+        OPEN_BINARY_ANNOTATIONS = {
+            "readOnlyHint": False,
+            "idempotentHint": False,
+            "openWorldHint": True  # reads from filesystem
+        }
+
+        @mcp.tool(annotations=OPEN_BINARY_ANNOTATIONS)
+        def open_binary(file_path: str, ctx: Context,
+                       bndb_path: Optional[str] = None,
+                       wait_for_analysis: bool = True) -> dict:
+            """Open a binary file from disk and load it into Binary Ninja for analysis.
+
+            This allows programmatic loading of new binaries without requiring
+            the user to manually open them in the Binary Ninja UI.
+
+            IMPORTANT: You MUST ask the user where they want the analyzed .bndb
+            database saved before calling this tool. The bndb_path parameter is
+            required and specifies the output location for the Binary Ninja
+            database file that preserves all analysis results.
+
+            When opening an existing .bndb database file, bndb_path is not
+            needed — the database is already saved on disk.
+
+            Args:
+                file_path: Absolute or relative path to the binary file to open
+                bndb_path: Path where the .bndb database file will be saved after
+                           analysis completes. This is required. Ask the user for
+                           the desired save location before calling this tool.
+                           Example: "C:/analysis/output/notepad.exe.bndb"
+                wait_for_analysis: Whether to wait for Binary Ninja's initial analysis
+                                   to complete before returning (default True).
+                                   Set to False for faster return on large binaries.
+
+            Returns:
+                Dictionary with:
+                - name: The name assigned to this binary in the context (use this for other tools)
+                - file_path: Resolved absolute path of the opened file
+                - bndb_path: Path of the saved .bndb database
+                - analysis_complete: Whether analysis finished
+                - function_count: Number of functions discovered
+                - error: Error message if any step partially failed, else null
+            """
+            context_manager: BinAssistMCPBinaryContextManager = ctx.request_context.lifespan_context
+            binary_name, status = context_manager.open_binary(
+                file_path=file_path,
+                bndb_path=bndb_path,
+                wait_for_analysis=wait_for_analysis
+            )
+            return {
+                "name": binary_name,
+                **status
+            }
+
         # Analysis tools
         @mcp.tool(annotations=MODIFY_ANNOTATIONS)
         def rename_symbol(filename: str, address_or_name: str, new_name: str, ctx: Context) -> str:

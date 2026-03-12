@@ -6,8 +6,9 @@ with automatic name deduplication and lifecycle management.
 """
 
 import threading
+import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from pathlib import Path
 
 from .logging import log
@@ -78,7 +79,6 @@ class BinAssistMCPBinaryContextManager:
                 self._evict_oldest_binary()
 
             # Add binary info
-            import time
             binary_info = BinaryInfo(
                 name=unique_name,
                 view=binary_view,
@@ -92,6 +92,220 @@ class BinAssistMCPBinaryContextManager:
 
             return unique_name
         
+    def open_binary(self, file_path: str, bndb_path: Optional[str] = None,
+                    wait_for_analysis: bool = True) -> Tuple[str, dict]:
+        """Open a binary file or existing .bndb database in Binary Ninja.
+
+        Uses the Binary Ninja UI to open the file (via UIContext.openFilename
+        dispatched on the main thread), then syncs the context manager with
+        the UI to pick up the new BinaryView. Falls back to headless bn.load()
+        if no UI is available.
+
+        For raw binaries (non-.bndb files): bndb_path is required. After
+        analysis completes, the analyzed database is saved to bndb_path.
+
+        For existing .bndb files: bndb_path is ignored — the database is
+        already on disk and will be opened directly.
+
+        Args:
+            file_path: Path to the binary file or .bndb database to open
+            bndb_path: Path where the .bndb database file should be saved
+                       after analysis completes. Required for raw binaries,
+                       ignored for .bndb files. The LLM should ask the user
+                       for the desired save location before calling this tool.
+            wait_for_analysis: Whether to wait for Binary Ninja's initial analysis
+                               to complete before returning (default True).
+                               Set to False for faster return on large binaries.
+
+        Returns:
+            Tuple of (binary_name, status_dict) where status_dict contains:
+            - file_path: Path of the opened file
+            - bndb_path: Path of the .bndb database (saved or existing)
+            - analysis_complete: Whether analysis finished
+            - function_count: Number of functions discovered
+            - error: Error message if any step failed (partial success possible)
+
+        Raises:
+            RuntimeError: If Binary Ninja is not available
+            FileNotFoundError: If the file_path does not exist
+            ValueError: If the file could not be loaded by Binary Ninja,
+                        or if bndb_path is missing for a raw binary
+        """
+        if not BINJA_AVAILABLE:
+            raise RuntimeError("Binary Ninja not available")
+
+        path = Path(file_path)
+        if not path.exists():
+            raise FileNotFoundError(f"File not found: {file_path}")
+
+        resolved_path = str(path.resolve())
+        is_bndb = path.suffix.lower() == '.bndb'
+
+        # bndb_path is required for raw binaries, ignored for .bndb files
+        if not is_bndb and (not bndb_path or not bndb_path.strip()):
+            raise ValueError(
+                "bndb_path is required when opening a raw binary — you must "
+                "specify where to save the analyzed .bndb database. Ask the "
+                "user for the desired save location."
+            )
+
+        status = {
+            "file_path": resolved_path,
+            "bndb_path": resolved_path if is_bndb else None,
+            "analysis_complete": False,
+            "function_count": 0,
+            "error": None,
+        }
+
+        log.log_info(f"Opening {'database' if is_bndb else 'binary'}: {file_path}")
+
+        # Determine if the UI is available
+        ui_available = False
+        try:
+            from binaryninjaui import UIContext
+            if UIContext.allContexts():
+                ui_available = True
+        except ImportError:
+            pass
+
+        bv = None
+
+        if ui_available:
+            # ----- UI mode: open via UIContext on the main thread -----
+            from binaryninja.mainthread import execute_on_main_thread_and_wait, is_main_thread
+
+            open_result = [False]
+
+            def _open_in_ui():
+                try:
+                    ctx = UIContext.allContexts()
+                    if ctx:
+                        open_result[0] = ctx[0].openFilename(resolved_path)
+                except Exception as e:
+                    log.log_warn(f"UIContext.openFilename failed: {e}")
+                    open_result[0] = False
+
+            log.log_info("Opening binary via UIContext.openFilename on main thread...")
+            if is_main_thread():
+                _open_in_ui()
+            else:
+                execute_on_main_thread_and_wait(_open_in_ui)
+
+            if not open_result[0]:
+                raise ValueError(
+                    f"Binary Ninja UI failed to open '{file_path}' — "
+                    "unsupported format, corrupt file, or no UI context available"
+                )
+
+            log.log_info(f"UI opened {file_path}, waiting for analysis...")
+
+            # Wait for BN to finish loading and analyzing the binary.
+            # The UI opens asynchronously; we need to poll until the view
+            # appears in the UI tabs and (optionally) analysis completes.
+            max_wait = 120  # seconds
+            poll_interval = 0.5
+            elapsed = 0.0
+
+            while elapsed < max_wait:
+                time.sleep(poll_interval)
+                elapsed += poll_interval
+
+                # Sync to discover the newly opened view
+                self.sync_with_binja()
+
+                # Look for the binary we just opened by matching file path
+                with self._lock:
+                    for name, info in self._binaries.items():
+                        if info.file_path and str(info.file_path) == resolved_path:
+                            bv = info.view
+                            break
+
+                if bv is not None:
+                    if not wait_for_analysis:
+                        break
+                    # Check if analysis is done
+                    if self._is_analysis_complete(bv):
+                        log.log_info(f"Analysis complete for {file_path}")
+                        break
+
+            if bv is None:
+                raise ValueError(
+                    f"Binary '{file_path}' was opened in the UI but did not appear "
+                    f"in context after {max_wait}s — this should not happen"
+                )
+
+        else:
+            # ----- Headless mode: fall back to bn.load() -----
+            log.log_info("No UI available, loading binary headlessly via bn.load()...")
+            try:
+                bv = bn.load(resolved_path)
+            except Exception as e:
+                raise ValueError(f"Binary Ninja failed to load '{file_path}': {e}")
+
+            if bv is None:
+                raise ValueError(
+                    f"Binary Ninja returned None for '{file_path}' — "
+                    "unsupported format or corrupt file"
+                )
+
+            log.log_info(f"Binary loaded headlessly: {file_path} (arch={getattr(bv, 'arch', 'unknown')})")
+
+            if wait_for_analysis:
+                try:
+                    log.log_info(f"Waiting for analysis to complete on {file_path}...")
+                    bv.update_analysis_and_wait()
+                    log.log_info(f"Analysis complete for {file_path}")
+                except Exception as e:
+                    log.log_warn(f"Analysis wait failed (non-fatal): {e}")
+                    status["error"] = f"Analysis wait failed: {e}"
+
+            # Add to context manager (in UI mode, sync_with_binja already did this)
+            self.add_binary(bv)
+
+        # --- Common post-open logic ---
+
+        status["analysis_complete"] = self._is_analysis_complete(bv)
+
+        # Count functions
+        try:
+            status["function_count"] = len(list(bv.functions))
+        except Exception:
+            pass
+
+        # Save analyzed database to .bndb (only for raw binaries, not .bndb files)
+        if not is_bndb and bndb_path:
+            bndb = Path(bndb_path)
+            try:
+                bndb.parent.mkdir(parents=True, exist_ok=True)
+                bv.create_database(str(bndb.resolve()))
+                status["bndb_path"] = str(bndb.resolve())
+                log.log_info(f"Saved .bndb database to {bndb_path}")
+            except Exception as e:
+                log.log_warn(f"Failed to save .bndb to '{bndb_path}': {e}")
+                if status["error"]:
+                    status["error"] += f"; bndb save failed: {e}"
+                else:
+                    status["error"] = f"bndb save failed: {e}"
+
+        # Find the name this binary was registered under
+        binary_name = None
+        with self._lock:
+            for name, info in self._binaries.items():
+                if info.view is bv:
+                    binary_name = name
+                    break
+
+        if binary_name is None:
+            binary_name = self._extract_name(bv)
+
+        log.log_info(
+            f"Binary '{binary_name}' ready in context "
+            f"(functions={status['function_count']}, "
+            f"analysis_complete={status['analysis_complete']})"
+        )
+
+        return binary_name, status
+
     def get_binary(self, name: str) -> object:
         """Get a BinaryView by name
 
@@ -458,7 +672,6 @@ class BinAssistMCPBinaryContextManager:
                             if len(self._binaries) >= self.max_binaries:
                                 self._evict_oldest_binary()
 
-                            import time
                             binary_info = BinaryInfo(
                                 name=unique_name,
                                 view=bv,
