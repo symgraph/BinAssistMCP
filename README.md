@@ -10,7 +10,7 @@ BinAssistMCP is a powerful bridge between Binary Ninja and Large Language Models
 
 - **MCP 2025-11-25 Compliant**: Full support for tool annotations, resources, and prompts
 - **Dual Transport Support**: SSE (Server-Sent Events) and Streamable HTTP transports
-- **36 Consolidated Tools**: Streamlined Binary Ninja API wrapper with unified tool design
+- **39 Consolidated Tools**: Streamlined Binary Ninja API wrapper with unified tool design
 - **8 MCP Resources**: Browsable, cacheable binary metadata
 - **7 Guided Prompts**: Pre-built workflows for common reverse engineering tasks
 - **Multi-Binary Sessions**: Concurrent analysis of multiple binaries with intelligent context management
@@ -34,7 +34,7 @@ BinAssistMCP is a powerful bridge between Binary Ninja and Large Language Models
 ```
 src/binassist_mcp/
 ├── server.py        # FastMCP server - SSE/Streamable HTTP transport, tool registration
-├── tools.py         # Binary Ninja API wrapper - 36 MCP tools
+├── tools.py         # Binary Ninja API wrapper - 39 MCP tools
 ├── plugin.py        # Binary Ninja plugin integration
 ├── context.py       # Thread-safe multi-binary session management
 ├── config.py        # Pydantic configuration with Binary Ninja settings
@@ -50,15 +50,15 @@ __init__.py          # Plugin entry point (root level)
 
 ---
 
-## Tools (36 Total)
+## Tools (39 Total)
 
-BinAssistMCP provides 36 tools organized into functional categories. Tools include MCP annotations (`readOnlyHint`, `idempotentHint`) to help clients make informed decisions.
+BinAssistMCP provides 39 tools organized into functional categories. Tools include MCP annotations (`readOnlyHint`, `idempotentHint`) to help clients make informed decisions.
 
 ### Binary Management
 | Tool | Description |
 |------|-------------|
 | `list_binaries` | List all loaded binary files |
-| `get_binary_status` | Check analysis status and metadata |
+| `get_binary_info` | Check analysis status and metadata |
 | `update_analysis_and_wait` | Force analysis update and wait for completion |
 
 ### Code Analysis (Consolidated)
@@ -73,22 +73,22 @@ BinAssistMCP provides 36 tools organized into functional categories. Tools inclu
 ### Cross-References (Consolidated)
 | Tool | Description |
 |------|-------------|
-| `xrefs_tool` | **Unified cross-references** - actions: `refs_to`, `refs_from`, `call_graph` |
+| `xrefs` | **Unified cross-references** - actions: `refs_to`, `refs_from`, `call_graph` |
 
 ### Comments (Consolidated)
 | Tool | Description |
 |------|-------------|
-| `comments_tool` | **Unified comment management** - actions: `get`, `set`, `list`, `remove`, `set_function` |
+| `comments` | **Unified comment management** - actions: `get`, `set`, `list`, `remove`, `set_function` |
 
 ### Variables (Consolidated)
 | Tool | Description |
 |------|-------------|
-| `variables_tool` | **Unified variable management** - actions: `list`, `create`, `rename`, `set_type` |
+| `variables` | **Unified variable management** - actions: `list`, `create`, `rename`, `set_type` |
 
 ### Types (Consolidated)
 | Tool | Description |
 |------|-------------|
-| `types_tool` | **Unified type management** - actions: `create`, `create_enum`, `create_typedef`, `create_class`, `add_member`, `get_info`, `list` |
+| `types` | **Unified type management** - actions: `create`, `create_enum`, `create_typedef`, `create_class`, `add_member`, `get_info`, `list` |
 | `get_classes` | List all classes and structures |
 
 ### Function Discovery
@@ -116,24 +116,27 @@ BinAssistMCP provides 36 tools organized into functional categories. Tools inclu
 | `search_strings` | Search strings by pattern |
 | `get_segments` | Memory segment layout |
 | `get_sections` | Binary section information |
+| `get_entry_points` | List all binary entry points |
 
 ### Data Analysis
 | Tool | Description |
 |------|-------------|
 | `create_data_var` | Define data variables at addresses |
 | `get_data_vars` | List all defined data variables |
-| `get_data_at_address` | Read and analyze raw data |
+| `get_data_at` | Read and analyze raw data |
 | `search_bytes` | Search for byte patterns in binary |
 
-### Navigation
+### Navigation & Bookmarks
 | Tool | Description |
 |------|-------------|
 | `get_current_address` | Get current cursor position with context |
 | `get_current_function` | Identify function at current address |
+| `bookmarks` | **Unified bookmark management** - actions: `list`, `set`, `remove` |
 
 ### Task Management
 | Tool | Description |
 |------|-------------|
+| `start_task` | Start an async background task |
 | `get_task_status` | Check status of async operations |
 | `list_tasks` | List all pending/running tasks |
 | `cancel_task` | Cancel a running task |
@@ -295,7 +298,7 @@ User: "Analyze the main function and explain what it does"
 Claude uses:
 1. get_functions() - find main
 2. get_code(format='decompile') - get readable code
-3. xrefs_tool(action='refs_from') - find called functions
+3. xrefs(action='refs_from') - find called functions
 4. analyze_function() - get complexity metrics
 ```
 
@@ -306,8 +309,8 @@ User: "Find buffer overflow vulnerabilities in input handling functions"
 Claude uses:
 1. search_functions_advanced(search_in='calls') - find memcpy/strcpy callers
 2. get_code(format='decompile') - examine implementations
-3. variables_tool(action='list') - check buffer sizes
-4. comments_tool(action='set') - document findings
+3. variables(action='list') - check buffer sizes
+4. comments(action='set') - document findings
 ```
 
 ### Protocol Reverse Engineering
