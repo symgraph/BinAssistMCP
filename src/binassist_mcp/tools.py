@@ -2651,7 +2651,8 @@ class BinAssistMCPTools:
 
         # Calculate total local size if available
         if hasattr(func, 'stack_adjustment'):
-            result["total_local_size"] = abs(func.stack_adjustment)
+            adj = func.stack_adjustment
+            result["total_local_size"] = int(adj) if adj is not None else 0
 
         return result
 

@@ -22,8 +22,8 @@ def analyze_function_prompt(function_name: str, filename: str) -> str:
 
 1. **Get Function Code**: Call `get_code` with format='decompile' to get the high-level code
 2. **Examine Variables**: Call `get_variables` to identify local variables and parameters
-3. **Find Cross-References**: Call `xrefs_tool` to understand callers and callees
-4. **Check Comments**: Call `comments_tool` with action='get' to see existing annotations
+3. **Find Cross-References**: Call `xrefs` to understand callers and callees
+4. **Check Comments**: Call `comments` with action='get' to see existing annotations
 
 After gathering this information, provide a summary that includes:
 - **Purpose**: What does this function do?
@@ -52,7 +52,7 @@ def identify_vulnerability_prompt(function_name: str, filename: str) -> str:
 1. **Get Function Code**: Call `get_code` with format='decompile' for high-level view
 2. **Get Disassembly**: Call `get_code` with format='disasm' for low-level details
 3. **Examine Variables**: Call `get_variables` to identify buffer sizes and types
-4. **Find Called Functions**: Call `xrefs_tool` to see what dangerous functions are called
+4. **Find Called Functions**: Call `xrefs` to see what dangerous functions are called
 
 ## Security Checklist
 
@@ -106,8 +106,8 @@ def document_function_prompt(function_name: str, filename: str) -> str:
 
 1. **Get Code**: Call `get_code` with format='pseudo_c' for C-style representation
 2. **Get Variables**: Call `get_variables` to understand parameter and local types
-3. **Get Callers**: Call `xrefs_tool` with direction='to' to find what calls this function
-4. **Get Callees**: Call `xrefs_tool` with direction='from' to find what this function calls
+3. **Get Callers**: Call `xrefs` with direction='to' to find what calls this function
+4. **Get Callees**: Call `xrefs` with direction='from' to find what this function calls
 
 ## Generate Documentation
 
@@ -152,7 +152,7 @@ def trace_data_flow_prompt(address: str, filename: str) -> str:
 1. **Get Context**: Call `get_disassembly` for the instruction at this address
 2. **Find Function**: Determine which function contains this address
 3. **Get Function Code**: Call `get_code` for the containing function
-4. **Trace References**: Call `xrefs_tool` to find related addresses
+4. **Trace References**: Call `xrefs` to find related addresses
 
 ## Data Flow Analysis
 
@@ -201,7 +201,7 @@ For each function, gather:
 1. **Decompiled Code**: Call `get_code` with format='decompile'
 2. **Variables**: Call `get_variables`
 3. **Basic Blocks**: Call `get_basic_blocks` for structure analysis
-4. **Cross-References**: Call `xrefs_tool`
+4. **Cross-References**: Call `xrefs`
 
 ## Comparison Analysis
 
@@ -247,8 +247,8 @@ def reverse_engineer_struct_prompt(address: str, filename: str) -> str:
 
 ## Analysis Steps
 
-1. **Get Context**: Call `get_data_at_address` to see the raw data
-2. **Find Usage**: Call `xrefs_tool` to find all references to this address
+1. **Get Context**: Call `get_data_at` to see the raw data
+2. **Find Usage**: Call `xrefs` to find all references to this address
 3. **Get Functions**: For each function that references it, call `get_code`
 4. **Analyze Access Patterns**: Look at how the data is accessed
 
@@ -321,9 +321,9 @@ Search for functions calling:
 
 For each network function found:
 
-1. **Get Callers**: Call `xrefs_tool` with direction='to' to find all callers
+1. **Get Callers**: Call `xrefs` with direction='to' to find all callers
 2. **Build Call Graph**: Recursively trace callers up to application-level handlers
-3. **Get Callees**: Call `xrefs_tool` with direction='from' to find data preparation functions
+3. **Get Callees**: Call `xrefs` with direction='from' to find data preparation functions
 
 Create a call hierarchy showing:
 ```
@@ -407,7 +407,7 @@ Provide:
 4. **Data Flow Diagram**: How data moves from application to network
 5. **Vulnerability Report**: Any security issues found with severity ratings
 
-Use `comments_tool` to annotate discovered protocol structures and `types_tool` to create Binary Ninja type definitions."""
+Use `comments` to annotate discovered protocol structures and `types` to create Binary Ninja type definitions."""
 
 
 # Registry of available prompts

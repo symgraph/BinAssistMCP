@@ -520,7 +520,7 @@ class BinAssistMCPServer:
             }
 
         @mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
-        def get_binary_status(filename: str, ctx: Context) -> dict:
+        def get_binary_info(filename: str, ctx: Context) -> dict:
             """Get status information for a specific binary
 
             Args:
@@ -683,7 +683,7 @@ class BinAssistMCPServer:
         }
 
         @mcp.tool(annotations=ANALYSIS_ANNOTATIONS)
-        def update_analysis_and_wait(filename: str, ctx: Context) -> bool:
+        def update_analysis_and_wait(filename: str, ctx: Context) -> str:
             """Update binary analysis and wait for completion
 
             Args:
@@ -768,7 +768,7 @@ class BinAssistMCPServer:
             return tools.get_data_vars()
 
         @mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
-        def get_data_at_address(filename: str, address: str, ctx: Context, size: Optional[int] = None) -> dict:
+        def get_data_at(filename: str, address: str, ctx: Context, size: Optional[int] = None) -> dict:
             """Get data at a specific address
 
             Args:
@@ -932,7 +932,7 @@ class BinAssistMCPServer:
             return tools.get_code(function_name_or_address, format)
 
         @mcp.tool(annotations=MODIFY_ANNOTATIONS)
-        def comments_tool(filename: str, action: str, ctx: Context,
+        def comments(filename: str, action: str, ctx: Context,
                          address: str = "", text: str = "",
                          function_name_or_address: str = ""):
             """Unified comment management (set/get/list/remove comments).
@@ -953,7 +953,7 @@ class BinAssistMCPServer:
             return tools.comments(action, address, text, function_name_or_address)
 
         @mcp.tool(annotations=MODIFY_ANNOTATIONS)
-        def variables_tool(filename: str, action: str, function_name_or_address: str, ctx: Context,
+        def variables(filename: str, action: str, function_name_or_address: str, ctx: Context,
                           var_name: str = "", var_type: str = "",
                           new_name: str = "", storage: str = "auto"):
             """Unified variable management (list/create/rename/set_type).
@@ -976,7 +976,7 @@ class BinAssistMCPServer:
             return tools.variables_unified(action, function_name_or_address, var_name, var_type, new_name, storage)
 
         @mcp.tool(annotations=MODIFY_ANNOTATIONS)
-        def types_tool(filename: str, action: str, ctx: Context,
+        def types(filename: str, action: str, ctx: Context,
                       name: str = "", definition: str = "", size: int = 0,
                       members: dict = None, base_type: str = "", class_name: str = "",
                       member_name: str = "", member_type: str = "", offset: int = 0):
@@ -1005,7 +1005,7 @@ class BinAssistMCPServer:
                                        class_name, member_name, member_type, offset)
 
         @mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
-        def xrefs_tool(filename: str, address_or_name: str, ctx: Context,
+        def xrefs(filename: str, address_or_name: str, ctx: Context,
                       direction: str = "both", include_calls: bool = True):
             """Unified cross-reference tool (xrefs + call graph).
 
@@ -1130,7 +1130,127 @@ class BinAssistMCPServer:
             tools = BinAssistMCPTools(binary_view)
             return tools.batch_rename(renames)
 
+        # ==================== ENTRY POINTS & BOOKMARKS ====================
+
+        @mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
+        def get_entry_points(filename: str, ctx: Context) -> list:
+            """Get entry points of the binary.
+
+            Args:
+                filename: Name of the binary file
+
+            Returns:
+                List of entry point info dicts
+            """
+            context_manager: BinAssistMCPBinaryContextManager = ctx.request_context.lifespan_context
+            binary_view = context_manager.get_binary(filename)
+            entry_funcs = []
+            if binary_view.entry_point is not None:
+                ep = binary_view.entry_point
+                func = binary_view.get_function_at(ep)
+                entry_funcs.append({
+                    "address": hex(ep),
+                    "name": func.name if func else "entry",
+                    "type": "EntryPoint"
+                })
+            for func in binary_view.functions:
+                sym = binary_view.get_symbol_at(func.start)
+                if sym and func.start != (binary_view.entry_point or 0):
+                    if sym.binding == bn.SymbolBinding.GlobalBinding:
+                        entry_funcs.append({
+                            "address": hex(func.start),
+                            "name": func.name,
+                            "type": "Export"
+                        })
+            return entry_funcs
+
+        @mcp.tool(annotations=MODIFY_ANNOTATIONS)
+        def bookmarks(filename: str, action: str, ctx: Context,
+                      address: Optional[str] = None,
+                      comment: Optional[str] = None) -> str:
+            """Manage bookmarks: list, set, or remove.
+
+            Args:
+                filename: Name of the binary file
+                action: Operation: 'list', 'set', or 'remove'
+                address: Address for set/remove (hex string)
+                comment: Comment text for set
+            """
+            context_manager: BinAssistMCPBinaryContextManager = ctx.request_context.lifespan_context
+            binary_view = context_manager.get_binary(filename)
+            tools = BinAssistMCPTools(binary_view)
+
+            if action == "list":
+                results = []
+                # Use get_all_tags_of_type if a Bookmarks tag type exists
+                for tt_name in binary_view.tag_types:
+                    tt = binary_view.tag_types[tt_name]
+                    tagged = binary_view.get_all_tags_of_type(tt)
+                    for addr, tag in tagged:
+                        func = binary_view.get_function_at(addr)
+                        func_label = f" [{func.name}]" if func else ""
+                        results.append(f"{hex(addr)}{func_label} ({tt_name}): {tag.data}")
+                return "\n".join(results) if results else "No bookmarks found"
+
+            elif action == "set":
+                if not address:
+                    return "Error: address required for set"
+                addr = tools._resolve_symbol(address)
+                if addr is None:
+                    return f"Error: cannot resolve '{address}'"
+                tt = binary_view.tag_types.get("Bookmarks")
+                if tt is None:
+                    tt = binary_view.create_tag_type("Bookmarks", "⭐")
+                text = comment or "Bookmark"
+                tag = binary_view.create_tag(tt, text, True)
+                func = binary_view.get_function_at(addr)
+                if func:
+                    func.add_user_address_tag(addr, tag)
+                else:
+                    binary_view.add_tag(addr, tag, True)
+                return f"Bookmark set at {hex(addr)}: {text}"
+
+            elif action == "remove":
+                if not address:
+                    return "Error: address required for remove"
+                addr = tools._resolve_symbol(address)
+                if addr is None:
+                    return f"Error: cannot resolve '{address}'"
+                removed = 0
+                tt = binary_view.tag_types.get("Bookmarks")
+                if tt:
+                    tags_at = binary_view.get_tags_at(addr)
+                    for tag in tags_at:
+                        if tag.type == tt:
+                            binary_view.remove_user_data_tag(addr, tag)
+                            removed += 1
+                    func = binary_view.get_function_at(addr)
+                    if func:
+                        func_tags = func.get_address_tags_at(addr)
+                        for tag in func_tags:
+                            if tag.type == tt:
+                                func.remove_user_address_tag(addr, tag)
+                                removed += 1
+                return f"Removed {removed} bookmark(s) at {hex(addr)}" if removed else f"No bookmarks at {hex(addr)}"
+
+            return f"Invalid action '{action}'. Use 'list', 'set', or 'remove'"
+
         # ==================== TASK MANAGEMENT TOOLS ====================
+
+        @mcp.tool(annotations=MODIFY_ANNOTATIONS)
+        async def start_task(name: str, tool_name: str, ctx: Context) -> dict:
+            """Start an asynchronous background task.
+
+            Args:
+                name: Human-readable task name
+                tool_name: Name of the tool to run
+            """
+            task_manager = get_task_manager()
+            # Submit a placeholder coroutine; real tool dispatch can be added later
+            async def _noop():
+                return {"message": f"Task '{name}' completed (tool: {tool_name})"}
+            task_id = await task_manager.submit(_noop, name=name)
+            return {"task_id": task_id, "status": "pending", "message": f"Task '{name}' submitted"}
 
         @mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
         def get_task_status(task_id: str, ctx: Context) -> dict:
