@@ -969,19 +969,22 @@ class BinAssistMCPServer:
             return tools.comments(action, address, text, function_name_or_address)
 
         @mcp.tool(annotations=MODIFY_ANNOTATIONS)
-        def variables(filename: str, action: str, function_name_or_address: str, ctx: Context,
+        def variables(filename: str, action: str, function_name_or_address: str = "", ctx: Context = None,
                           var_name: str = "", var_type: str = "",
-                          new_name: str = "", storage: str = "auto"):
-            """Unified variable management (list/create/rename/set_type).
+                          new_name: str = "", storage: str = "auto",
+                          scope: str = "auto", address_or_name: str = ""):
+            """Unified variable management (list/create/rename/set_type) for local and global variables.
 
             Args:
                 filename: Name of the binary file
                 action: 'list', 'create', 'rename', or 'set_type'
-                function_name_or_address: Function identifier
-                var_name: Variable name
+                function_name_or_address: Function identifier for local variable operations
+                var_name: Variable name, or global symbol name fallback for global rename
                 var_type: Variable type
                 new_name: New name for rename
                 storage: Storage type for create
+                scope: Rename scope ('auto', 'local', 'global')
+                address_or_name: Global/data symbol address or name for global rename
 
             Returns:
                 List or success message
@@ -989,7 +992,16 @@ class BinAssistMCPServer:
             context_manager: BinAssistMCPBinaryContextManager = ctx.request_context.lifespan_context
             binary_view = context_manager.get_binary(filename)
             tools = BinAssistMCPTools(binary_view)
-            return tools.variables_unified(action, function_name_or_address, var_name, var_type, new_name, storage)
+            return tools.variables_unified(
+                action,
+                function_name_or_address,
+                var_name,
+                var_type,
+                new_name,
+                storage,
+                scope,
+                address_or_name,
+            )
 
         @mcp.tool(annotations=MODIFY_ANNOTATIONS)
         def types(filename: str, action: str, ctx: Context,

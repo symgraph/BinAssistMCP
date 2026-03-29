@@ -181,6 +181,35 @@ class BinAssistMCPTools:
             return f"Successfully renamed data variable at {hex(addr)} from '{old_name}' to '{new_name}'"
             
         raise ValueError(f"No function or data variable found at address {hex(addr)}")
+
+    @handle_exceptions
+    @require_binja
+    def rename_global_variable(self, address_or_name: str, new_name: str) -> str:
+        """Rename a non-function global/data symbol.
+
+        Args:
+            address_or_name: Address (hex string) or current global/data symbol name
+            new_name: New name for the symbol
+
+        Returns:
+            Success message string
+        """
+        addr = self._resolve_symbol(address_or_name)
+        if addr is None:
+            raise ValueError(f"No global/data symbol found with name/address '{address_or_name}'")
+
+        if self.bv.get_function_at(addr):
+            raise ValueError(
+                f"Target '{address_or_name}' resolves to a function at {hex(addr)}; "
+                "use variables(action='rename', scope='local') for locals or rename_symbol for functions"
+            )
+
+        symbol = self.bv.get_symbol_at(addr)
+        old_name = symbol.name if symbol else "unnamed"
+        symbol_type = symbol.type if symbol else bn.SymbolType.DataSymbol
+
+        self.bv.define_user_symbol(bn.Symbol(symbol_type, addr, new_name))
+        return f"Successfully renamed global symbol at {hex(addr)} from '{old_name}' to '{new_name}'"
         
     @handle_exceptions
     @require_binja
@@ -2264,7 +2293,8 @@ class BinAssistMCPTools:
     @require_binja
     def variables_unified(self, action: str, function_name_or_address: str,
                          var_name: str = "", var_type: str = "",
-                         new_name: str = "", storage: str = "auto") -> Union[str, List]:
+                         new_name: str = "", storage: str = "auto",
+                         scope: str = "auto", address_or_name: str = "") -> Union[str, List]:
         """Unified variable management tool.
 
         Consolidates: create_variable, get_variables, rename_variable, set_variable_type
@@ -2280,28 +2310,58 @@ class BinAssistMCPTools:
             var_type: Variable type (for create/set_type)
             new_name: New variable name (for rename)
             storage: Storage type for create ('auto', 'register', etc.)
+            scope: Rename scope for 'rename' action ('auto', 'local', 'global')
+            address_or_name: Global/data symbol address or name for global rename
 
         Returns:
             List for 'list' action, success message string for others
         """
-        func = self._get_function_by_name_or_address(function_name_or_address)
-        if not func:
-            raise ValueError(f"Function not found: {function_name_or_address}")
-
         if action == "list":
+            func = self._get_function_by_name_or_address(function_name_or_address)
+            if not func:
+                raise ValueError(f"Function not found: {function_name_or_address}")
             return self.get_variables(function_name_or_address)
 
         elif action == "create":
+            func = self._get_function_by_name_or_address(function_name_or_address)
+            if not func:
+                raise ValueError(f"Function not found: {function_name_or_address}")
             if not var_name or not var_type:
                 raise ValueError("var_name and var_type required for 'create' action")
             return self.create_variable(function_name_or_address, var_name, var_type, storage)
 
         elif action == "rename":
-            if not var_name or not new_name:
-                raise ValueError("var_name and new_name required for 'rename' action")
-            return self.rename_variable(function_name_or_address, var_name, new_name)
+            if not new_name:
+                raise ValueError("new_name required for 'rename' action")
+
+            normalized_scope = (scope or "auto").lower()
+            if normalized_scope not in {"auto", "local", "global"}:
+                raise ValueError("scope must be one of: auto, local, global")
+
+            local_requested = (
+                normalized_scope == "local"
+                or (
+                    normalized_scope == "auto"
+                    and function_name_or_address
+                    and var_name
+                    and not address_or_name
+                )
+            )
+
+            if local_requested:
+                if not function_name_or_address or not var_name:
+                    raise ValueError("function_name_or_address and var_name required for local rename")
+                return self.rename_variable(function_name_or_address, var_name, new_name)
+
+            target = address_or_name or var_name
+            if not target:
+                raise ValueError("address_or_name or var_name required for global rename")
+            return self.rename_global_variable(target, new_name)
 
         elif action == "set_type":
+            func = self._get_function_by_name_or_address(function_name_or_address)
+            if not func:
+                raise ValueError(f"Function not found: {function_name_or_address}")
             if not var_name or not var_type:
                 raise ValueError("var_name and var_type required for 'set_type' action")
             return self.set_variable_type(function_name_or_address, var_name, var_type)

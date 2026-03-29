@@ -83,7 +83,7 @@ BinAssistMCP provides 39 tools organized into functional categories. Tools inclu
 ### Variables (Consolidated)
 | Tool | Description |
 |------|-------------|
-| `variables` | **Unified variable management** - actions: `list`, `create`, `rename`, `set_type` |
+| `variables` | **Unified variable management** - actions: `list`, `create`, `rename`, `set_type`; `rename` supports local/global via `scope` |
 
 ### Types (Consolidated)
 | Tool | Description |
