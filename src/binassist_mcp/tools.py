@@ -9,6 +9,7 @@ import re
 from typing import Any, Dict, List, Optional, Union
 from pathlib import Path
 
+from .function_signature_generator import BinaryNinjaFunctionSignatureGenerator
 from .logging import log
 
 try:
@@ -1572,6 +1573,21 @@ class BinAssistMCPTools:
         }
         
         return analysis
+
+    @handle_exceptions
+    @require_binja
+    def get_function_signature(self, function_name_or_address: str) -> Dict[str, Any]:
+        """Get the native BinAssist byte signature for a function."""
+        func = self._get_function_by_name_or_address(function_name_or_address)
+        if not func:
+            raise ValueError(f"Function not found: {function_name_or_address}")
+
+        generator = BinaryNinjaFunctionSignatureGenerator(self.bv)
+        return {
+            "name": func.name,
+            "address": hex(func.start),
+            "signature": generator.generate(func),
+        }
         
     def _calculate_cyclomatic_complexity(self, func) -> int:
         """Calculate cyclomatic complexity for a function"""

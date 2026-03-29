@@ -807,6 +807,22 @@ class BinAssistMCPServer:
             tools = BinAssistMCPTools(binary_view)
             return tools.analyze_function(function_name_or_address)
 
+        @mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
+        def get_function_signature(filename: str, function_name_or_address: str, ctx: Context) -> dict:
+            """Get the native BinAssist byte signature for a function.
+
+            Args:
+                filename: Name of the binary file
+                function_name_or_address: Function name or address
+
+            Returns:
+                Dictionary with function name, address, and byte signature
+            """
+            context_manager: BinAssistMCPBinaryContextManager = ctx.request_context.lifespan_context
+            binary_view = context_manager.get_binary(filename)
+            tools = BinAssistMCPTools(binary_view)
+            return tools.get_function_signature(function_name_or_address)
+
         # Enhanced function listing tools
         @mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
         def get_functions_advanced(filename: str, ctx: Context,
