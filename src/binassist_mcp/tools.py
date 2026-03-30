@@ -454,7 +454,37 @@ class BinAssistMCPTools:
                 "basic_block_count": len(list(func.basic_blocks))
             })
         return functions
-        
+
+    @handle_exceptions
+    @require_binja
+    def get_parent_function(self, address: str) -> Dict[str, Any]:
+        """Get the function containing the given address
+
+        Args:
+            address: Address in hex format (e.g., '0x401000')
+
+
+        Returns:
+            Dictionary with parent function name and start address
+
+        Raises:
+            ValueError: If address is invalid or no function contains it
+        """
+        addr = self._resolve_symbol(address)
+        if addr is None:
+            raise ValueError(f"Invalid address: {address}")
+
+        funcs = self.bv.get_functions_containing(addr)
+        if not funcs:
+            raise ValueError(f"No function found containing address {hex(addr)}")
+
+        func = funcs[0]
+        return {
+            "name": func.name,
+            "address": hex(func.start),
+            "queried_address": hex(addr)
+        }
+
     @handle_exceptions
     @require_binja
     def search_functions_by_name(self, search_term: str) -> List[Dict[str, Any]]:

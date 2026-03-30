@@ -583,6 +583,22 @@ class BinAssistMCPServer:
             return tools.get_functions()
 
         @mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
+        def get_parent_function(filename: str, address: str, ctx: Context) -> dict:
+            """Get the function containing the given address
+
+            Args:
+                filename: Name of the binary file
+                address: Address in hex format (e.g., '0x401000')
+
+            Returns:
+                Dictionary with parent function name and start address
+            """
+            context_manager: BinAssistMCPBinaryContextManager = ctx.request_context.lifespan_context
+            binary_view = context_manager.get_binary(filename)
+            tools = BinAssistMCPTools(binary_view)
+            return tools.get_parent_function(address)
+
+        @mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
         def search_functions_by_name(filename: str, search_term: str, ctx: Context) -> list:
             """Search functions by name substring
 
