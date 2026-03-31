@@ -146,6 +146,50 @@ class BinAssistMCPTools:
                 return func
                 
         return None
+
+    def _get_function_containing_or_at(self, addr: int):
+        """Resolve an address to the function that owns it."""
+        func = self.bv.get_function_at(addr)
+        if func:
+            return func
+
+        funcs = self.bv.get_functions_containing(addr)
+        if funcs:
+            return funcs[0]
+
+        return None
+
+    def _get_call_target_functions(self, call_site) -> List[Any]:
+        """Resolve function call targets for a call site."""
+        targets = []
+        seen = set()
+
+        for attr in ("destination", "dest", "function", "callee"):
+            target = getattr(call_site, attr, None)
+            if target is None:
+                continue
+
+            target_func = None
+            if hasattr(target, "start") and hasattr(target, "name"):
+                target_func = target
+            elif isinstance(target, int):
+                target_func = self.bv.get_function_at(target)
+
+            if target_func and target_func.start not in seen:
+                seen.add(target_func.start)
+                targets.append(target_func)
+
+        site_addr = getattr(call_site, "address", None)
+        if site_addr is None:
+            return targets
+
+        for target_addr in self.bv.get_code_refs_from(site_addr):
+            target_func = self.bv.get_function_at(target_addr)
+            if target_func and target_func.start not in seen:
+                seen.add(target_func.start)
+                targets.append(target_func)
+
+        return targets
         
     # Core analysis tools
     @handle_exceptions
@@ -1481,8 +1525,7 @@ class BinAssistMCPTools:
             for call_site in func.call_sites:
                 try:
                     if hasattr(call_site, 'address'):
-                        called_func = self.bv.get_function_at(call_site.address)
-                        if called_func:
+                        for called_func in self._get_call_target_functions(call_site):
                             calls_to.append({
                                 "function": called_func.name,
                                 "address": hex(called_func.start),
@@ -1515,8 +1558,7 @@ class BinAssistMCPTools:
                 for call_site in func.call_sites:
                     try:
                         if hasattr(call_site, 'address'):
-                            called_func = self.bv.get_function_at(call_site.address)
-                            if called_func:
+                            for called_func in self._get_call_target_functions(call_site):
                                 calls.append({
                                     "target": called_func.name,
                                     "address": hex(called_func.start)
@@ -1576,8 +1618,7 @@ class BinAssistMCPTools:
         for call_site in func.call_sites:
             try:
                 if hasattr(call_site, 'address'):
-                    called_func = self.bv.get_function_at(call_site.address)
-                    if called_func:
+                    for called_func in self._get_call_target_functions(call_site):
                         calls_to.append(called_func.name)
             except Exception as e:
                 log.log_debug(f"Error processing call_site in analyze_function: {e}")
@@ -1874,8 +1915,7 @@ class BinAssistMCPTools:
                 for call_site in func.call_sites:
                     try:
                         if hasattr(call_site, 'address'):
-                            called_func = self.bv.get_function_at(call_site.address)
-                            if called_func:
+                            for called_func in self._get_call_target_functions(call_site):
                                 called_name = called_func.name if case_sensitive else called_func.name.lower()
                                 if search_lower in called_name:
                                     match_found = True
@@ -2473,7 +2513,7 @@ class BinAssistMCPTools:
             if direction in ("to", "both"):
                 refs = self.bv.get_code_refs(addr)
                 for ref in refs:
-                    ref_func = self.bv.get_function_at(ref.address)
+                    ref_func = self._get_function_containing_or_at(ref.address)
                     result["references_to"].append({
                         "address": hex(ref.address),
                         "function": ref_func.name if ref_func else None
@@ -2502,7 +2542,7 @@ class BinAssistMCPTools:
 
             # Get callers
             for ref in self.bv.get_code_refs(func.start):
-                caller_func = self.bv.get_function_at(ref.address)
+                caller_func = self._get_function_containing_or_at(ref.address)
                 if caller_func and caller_func != func:
                     result["call_graph"]["callers"].append({
                         "name": caller_func.name,
