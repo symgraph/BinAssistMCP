@@ -2761,6 +2761,109 @@ class BinAssistMCPTools:
 
     @handle_exceptions
     @require_binja
+    def get_function_analysis_limits(self, function_name_or_address: str) -> Dict[str, Any]:
+        """Get the effective per-function analysis limit overrides plus current IL availability.
+
+        Use this before/after reanalyze_function() to see whether a Function Resource
+        Setting override is already in place and whether HLIL/MLIL/LLIL are available yet.
+
+        Args:
+            function_name_or_address: Function identifier (name or hex address)
+
+        Returns:
+            Dictionary with the effective expressionValueComputeMaxDepth and
+            maxFunctionAnalysisTime (BinaryView default unless overridden for this
+            function), analysis_skipped state, and IL availability flags.
+        """
+        func = self._get_function_by_name_or_address(function_name_or_address)
+        if not func:
+            raise ValueError(f"Function not found: {function_name_or_address}")
+
+        settings = bn.Settings()
+        return {
+            "function": func.name,
+            "address": hex(func.start),
+            "expression_depth": settings.get_integer(
+                "analysis.limits.expressionValueComputeMaxDepth", func),
+            "max_analysis_time": settings.get_integer(
+                "analysis.limits.maxFunctionAnalysisTime", func),
+            "analysis_skipped": func.analysis_skipped,
+            "hlil_available": func.hlil_if_available is not None,
+            "mlil_available": func.mlil_if_available is not None,
+            "llil_available": func.llil_if_available is not None,
+        }
+
+    @handle_exceptions
+    @require_binja
+    def reanalyze_function(self, function_name_or_address: str,
+                            expression_depth: Optional[int] = None,
+                            max_analysis_time: Optional[int] = None) -> Dict[str, Any]:
+        """Force a targeted reanalysis of one function, optionally overriding its
+        per-function analysis limits (stored as Function Resource Settings in the BNDB,
+        inherited from the BinaryView otherwise).
+
+        Use this when get_code()/get_function_low_level_il() report fallback_used=True
+        or "<IL> not available for this function" for one specific function and Binary
+        Ninja's log shows an internal analysis limit being hit (e.g. "exceeded maximum
+        recursion depth for Analyze requests" or a deferred/too-large-function message).
+        Escalate expression_depth in steps (e.g. 8192 -> 16384 -> 32768 -> 65536) rather
+        than jumping straight to a very large value, since this setting affects analysis
+        cost for this function on every future reanalysis.
+
+        Args:
+            function_name_or_address: Function identifier (name or hex address)
+            expression_depth: If set, overrides analysis.limits.expressionValueComputeMaxDepth
+                for this function only (BinaryView default is commonly 512-4096)
+            max_analysis_time: If set, overrides analysis.limits.maxFunctionAnalysisTime
+                in milliseconds for this function only (0 disables the time limit for
+                this function - only use for functions already known to terminate)
+
+        Returns:
+            Dictionary with the applied overrides and resulting IL availability
+        """
+        func = self._get_function_by_name_or_address(function_name_or_address)
+        if not func:
+            raise ValueError(f"Function not found: {function_name_or_address}")
+
+        settings = bn.Settings()
+        overrides_applied: Dict[str, int] = {}
+
+        if expression_depth is not None:
+            settings.set_integer(
+                "analysis.limits.expressionValueComputeMaxDepth",
+                expression_depth,
+                resource=func,
+                scope=bn.SettingsScope.SettingsResourceScope,
+            )
+            overrides_applied["expression_depth"] = expression_depth
+
+        if max_analysis_time is not None:
+            settings.set_integer(
+                "analysis.limits.maxFunctionAnalysisTime",
+                max_analysis_time,
+                resource=func,
+                scope=bn.SettingsScope.SettingsResourceScope,
+            )
+            overrides_applied["max_analysis_time"] = max_analysis_time
+
+        # reanalyze() is a no-op while analysis_skipped is True (see BN API docs)
+        if func.analysis_skipped:
+            func.analysis_skipped = False
+
+        func.reanalyze()
+        self.bv.update_analysis_and_wait()
+
+        return {
+            "function": func.name,
+            "address": hex(func.start),
+            "overrides_applied": overrides_applied,
+            "hlil_available": func.hlil_if_available is not None,
+            "mlil_available": func.mlil_if_available is not None,
+            "llil_available": func.llil_if_available is not None,
+        }
+
+    @handle_exceptions
+    @require_binja
     def search_strings(self, pattern: str, case_sensitive: bool = False,
                        page_size: int = 100, page_number: int = 1) -> Dict[str, Any]:
         """Search for strings matching a pattern with pagination.
