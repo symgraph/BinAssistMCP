@@ -2783,10 +2783,16 @@ class BinAssistMCPTools:
         return {
             "function": func.name,
             "address": hex(func.start),
-            "expression_depth": settings.get_integer(
-                "analysis.limits.expressionValueComputeMaxDepth", func),
-            "max_analysis_time": settings.get_integer(
-                "analysis.limits.maxFunctionAnalysisTime", func),
+            "expression_depth": settings.get_integer_with_scope(
+                "analysis.limits.expressionValueComputeMaxDepth",
+                resource=func,
+                scope=bn.SettingsScope.SettingsResourceScope,
+            )[0],
+            "max_analysis_time": settings.get_integer_with_scope(
+                "analysis.limits.maxFunctionAnalysisTime",
+                resource=func,
+                scope=bn.SettingsScope.SettingsResourceScope,
+            )[0],
             "analysis_skipped": func.analysis_skipped,
             "hlil_available": func.hlil_if_available is not None,
             "mlil_available": func.mlil_if_available is not None,
