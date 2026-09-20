@@ -1287,6 +1287,59 @@ class BinAssistMCPServer:
             return tools.get_function_low_level_il(address_or_name)
 
         @mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
+        def get_function_analysis_limits(filename: str, function_name_or_address: str, ctx: Context) -> dict:
+            """Get the effective per-function analysis limit overrides plus current IL availability.
+
+            Args:
+                filename: Name of the binary file
+                function_name_or_address: Function identifier (name or hex address)
+
+            Returns:
+                Dictionary with effective expressionValueComputeMaxDepth,
+                maxFunctionAnalysisTime, analysis_skipped state, and IL availability flags
+            """
+            context_manager: BinAssistMCPBinaryContextManager = ctx.request_context.lifespan_context
+            guard = _check_analysis_guard(context_manager, filename)
+            if guard:
+                return guard
+            binary_view = context_manager.get_binary(filename)
+            tools = BinAssistMCPTools(binary_view)
+            return tools.get_function_analysis_limits(function_name_or_address)
+
+        @mcp.tool(annotations=ANALYSIS_ANNOTATIONS)
+        def reanalyze_function(filename: str, function_name_or_address: str, ctx: Context,
+                                expression_depth: Optional[int] = None,
+                                max_analysis_time: Optional[int] = None) -> dict:
+            """Force a targeted reanalysis of one function, optionally overriding its
+            per-function analysis limits (Function Resource Settings, stored in the BNDB).
+
+            Use this when get_code() / get_function_low_level_il() keep returning
+            fallback_used=True or "<IL> not available" for one specific function.
+            Escalate expression_depth gradually (e.g. 8192, 16384, 32768, 65536)
+            instead of jumping straight to a very large value.
+
+            Args:
+                filename: Name of the binary file
+                function_name_or_address: Function identifier (name or hex address)
+                expression_depth: Override for analysis.limits.expressionValueComputeMaxDepth
+                    for this function only (omit to leave the BinaryView default in effect)
+                max_analysis_time: Override for analysis.limits.maxFunctionAnalysisTime in
+                    milliseconds for this function only (0 disables the time limit)
+
+            Returns:
+                Dictionary with the applied overrides and resulting IL availability
+            """
+            context_manager: BinAssistMCPBinaryContextManager = ctx.request_context.lifespan_context
+            guard = _check_analysis_guard(context_manager, filename)
+            if guard:
+                return guard
+            binary_view = context_manager.get_binary(filename)
+            tools = BinAssistMCPTools(binary_view)
+            result = tools.reanalyze_function(function_name_or_address, expression_depth, max_analysis_time)
+            context_manager.update_analysis_status(filename)
+            return result
+
+        @mcp.tool(annotations=READ_ONLY_ANNOTATIONS)
         def search_strings(filename: str, pattern: str, ctx: Context,
                           case_sensitive: bool = False,
                           page_size: int = 100, page_number: int = 1) -> dict:
@@ -1518,7 +1571,7 @@ class BinAssistMCPServer:
                     return f"Error: cannot resolve '{address}'"
                 tt = binary_view.tag_types.get("Bookmarks")
                 if tt is None:
-                    tt = binary_view.create_tag_type("Bookmarks", "⭐")
+                    tt = binary_view.create_tag_type("Bookmarks", "\u2b50")
                 text = comment or "Bookmark"
                 tag = binary_view.create_tag(tt, text, True)
                 func = binary_view.get_function_at(addr)
