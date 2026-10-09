@@ -1,5 +1,8 @@
 # BinAssistMCP
 
+> [!IMPORTANT]
+> **Planned archival:** BinAssistMCP is planned for archival as Binary Ninja introduces a bundled native MCP server. Native support removes the need to maintain a separate MCP integration and keeps it aligned with Binary Ninja itself. Please use Binary Ninja's native MCP server once it is available in your installed version. This repository will remain available for reference.
+
 > Comprehensive Model Context Protocol (MCP) server for Binary Ninja with AI-powered reverse engineering capabilities
 
 ## Summary
